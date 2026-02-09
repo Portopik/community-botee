@@ -1,17 +1,29 @@
 import json
 import os
+import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# ========== НАСТРОЙКИ ==========
-TOKEN = "8533919423:AAEmkagykEzeRorF-MzkQSIrrITwcpQRtP8"  # ЗАМЕНИТЕ НА ВАШ ТОКЕН ОТ @BotFather
+# ========== НАСТРОЙКИ ЛОГИРОВАНИЯ ==========
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ========== НАСТРОЙКИ БОТА ==========
+# Получаем токен из переменных окружения (так делают на хостингах)
+TOKEN = os.environ.get('BOT_TOKEN', 'ВАШ_ТОКЕН_ЗДЕСЬ')
+
+if TOKEN == 'В8533919423:AAEmkagykEzeRorF-MzkQSIrrITwcpQRtP8':
+    logger.warning("⚠️ Токен не установлен! Установите переменную окружения BOT_TOKEN")
 
 # Ссылки
 RULES_LINK = "https://t.me/+-yBQzgebofs2MWUy"
 CHAT_LINK = "https://t.me/+xvWIFeupCAtkZDgy"
 
-# Ранги (10 ранга нет для обычных пользователей)
+# Ранги (только 9 рангов для пользователей)
 RANKS = [
     {"symbol": "?", "name": "Луркер 🕶️", "xp": 0},
     {"symbol": "??", "name": "Ньюфаг 🐣", "xp": 50},
@@ -22,12 +34,10 @@ RANKS = [
     {"symbol": "???????", "name": "Модератор ⚖️", "xp": 1200},
     {"symbol": "????????", "name": "Интегратор 🔗", "xp": 1700},
     {"symbol": "?????????", "name": "Легенда 🏆", "xp": 2300}
-    # 10 ранг (?????????? — ОГ (Original G) 👑) только для разработчика
 ]
 
-# Конфигурация заданий (без заданий для 10 ранга)
+# Конфигурация заданий
 QUESTS = {
-    # Для рангов 1-3 (0-299 XP)
     "rank_1_3": [
         {
             "id": "chat_top3",
@@ -61,7 +71,6 @@ QUESTS = {
         }
     ],
     
-    # Для рангов 4-7 (300-1199 XP)
     "rank_4_7": [
         {
             "id": "like_giver",
@@ -85,7 +94,6 @@ QUESTS = {
         }
     ],
     
-    # Для рангов 7-9 (1200-2300 XP)
     "rank_7_9": [
         {
             "id": "nerd_giver",
@@ -106,41 +114,48 @@ QUESTS = {
             "reward_xp": 70,
             "reward_bonus": 30,
             "icon": "🎨"
-        },
-        {
-            "id": "community_leader",
-            "name": "Лидер сообщества 👑",
-            "description": "Провести мини-ивент или активность",
-            "type": "event_hosted",
-            "goal": 1,
-            "reward_xp": 80,
-            "reward_bonus": 35,
-            "icon": "👑"
         }
     ]
 }
 
-# Данные
+# ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
 users = {}
 sticker_tracker = {}
 
-# ========== ФУНКЦИИ СОХРАНЕНИЯ ==========
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ ==========
+def get_data_file_path():
+    """Получить путь к файлу данных"""
+    # На хостинге данные лучше хранить в /tmp или рабочей директории
+    return "bot_data.json"
+
 def save_data():
     """Сохранить данные в файл"""
-    data = {"users": users}
-    with open("bot_data.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        data = {"users": users, "last_save": datetime.now().isoformat()}
+        with open(get_data_file_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Данные сохранены")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения данных: {e}")
+        return False
 
 def load_data():
     """Загрузить данные из файла"""
     global users
-    if os.path.exists("bot_data.json"):
-        try:
-            with open("bot_data.json", "r", encoding="utf-8") as f:
+    try:
+        filepath = get_data_file_path()
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 users = data.get("users", {})
-        except:
+                logger.info(f"Загружено {len(users)} пользователей")
+        else:
             users = {}
+            logger.info("Файл данных не найден, создаем новый")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки данных: {e}")
+        users = {}
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_rank_info(xp):
@@ -159,8 +174,6 @@ def init_user_quests():
             "nerds_given": 0,
             "warns_given": 0,
             "punishments_received": 0,
-            "content_created": 0,
-            "event_hosted": 0,
             "messages_today": 0
         },
         "completed_today": [],
@@ -176,7 +189,7 @@ def get_available_quests(xp):
         return QUESTS["rank_1_3"]
     elif xp < 1200:  # Ранги 4-7
         return QUESTS["rank_4_7"]
-    else:  # Ранги 7-9 (максимум для обычных пользователей)
+    else:  # Ранги 7-9
         return QUESTS["rank_7_9"]
 
 def check_daily_reset(user_quests):
@@ -184,119 +197,122 @@ def check_daily_reset(user_quests):
     if "last_reset" not in user_quests:
         return user_quests
     
-    last_reset = datetime.fromisoformat(user_quests["last_reset"])
-    now = datetime.now()
-    
-    # Если прошло больше дня
-    if (now - last_reset).days >= 1:
-        user_quests["daily_progress"] = {
-            "hearts_given": 0,
-            "likes_given": 0,
-            "nerds_given": 0,
-            "warns_given": 0,
-            "punishments_received": 0,
-            "content_created": 0,
-            "event_hosted": 0,
-            "messages_today": 0
-        }
-        user_quests["completed_today"] = []
-        user_quests["last_reset"] = now.isoformat()
+    try:
+        last_reset = datetime.fromisoformat(user_quests["last_reset"])
+        now = datetime.now()
+        
+        if (now - last_reset).days >= 1:
+            user_quests["daily_progress"] = {
+                "hearts_given": 0,
+                "likes_given": 0,
+                "nerds_given": 0,
+                "warns_given": 0,
+                "punishments_received": 0,
+                "messages_today": 0
+            }
+            user_quests["completed_today"] = []
+            user_quests["last_reset"] = now.isoformat()
+    except Exception as e:
+        logger.error(f"Ошибка сброса заданий: {e}")
     
     return user_quests
 
 def update_quest_progress(user_quests, quest_type, amount=1):
     """Обновить прогресс задания"""
-    if quest_type in user_quests["daily_progress"]:
-        user_quests["daily_progress"][quest_type] += amount
+    try:
+        if quest_type in user_quests.get("daily_progress", {}):
+            user_quests["daily_progress"][quest_type] += amount
+    except Exception as e:
+        logger.error(f"Ошибка обновления прогресса: {e}")
     return user_quests
 
 def check_quest_completion(user_quests, xp):
     """Проверить выполнение заданий"""
-    available_quests = get_available_quests(xp)
     rewards = {"xp": 0, "bonus": 0, "completed": []}
     
-    for quest in available_quests:
-        # Пропускаем уже выполненные сегодня
-        if quest["id"] in user_quests.get("completed_today", []):
-            continue
+    try:
+        available_quests = get_available_quests(xp)
         
-        progress = user_quests["daily_progress"].get(quest["type"], 0)
-        
-        # Проверяем выполнение
-        if quest["type"] == "no_punishments":
-            if user_quests["daily_progress"].get("punishments_received", 0) == 0:
-                completed = True
+        for quest in available_quests:
+            if quest["id"] in user_quests.get("completed_today", []):
+                continue
+            
+            progress = user_quests["daily_progress"].get(quest["type"], 0)
+            
+            if quest["type"] == "no_punishments":
+                completed = user_quests["daily_progress"].get("punishments_received", 0) == 0
             else:
-                completed = False
-        else:
-            completed = progress >= quest["goal"]
+                completed = progress >= quest["goal"]
+            
+            if completed:
+                rewards["xp"] += quest["reward_xp"]
+                rewards["bonus"] += quest["reward_bonus"]
+                rewards["completed"].append(quest["name"])
+                
+                if "completed_today" not in user_quests:
+                    user_quests["completed_today"] = []
+                user_quests["completed_today"].append(quest["id"])
+                
+                if quest["id"] not in user_quests.get("completed_total", []):
+                    if "completed_total" not in user_quests:
+                        user_quests["completed_total"] = []
+                    user_quests["completed_total"].append(quest["id"])
         
-        if completed:
-            rewards["xp"] += quest["reward_xp"]
-            rewards["bonus"] += quest["reward_bonus"]
-            rewards["completed"].append(quest["name"])
-            
-            # Добавляем в выполненные
-            if "completed_today" not in user_quests:
-                user_quests["completed_today"] = []
-            user_quests["completed_today"].append(quest["id"])
-            
-            # В общий список
-            if quest["id"] not in user_quests.get("completed_total", []):
-                if "completed_total" not in user_quests:
-                    user_quests["completed_total"] = []
-                user_quests["completed_total"].append(quest["id"])
-    
-    # Обновляем бонусные очки
-    user_quests["bonus_points"] = user_quests.get("bonus_points", 0) + rewards["bonus"]
-    user_quests["total_xp_from_quests"] = user_quests.get("total_xp_from_quests", 0) + rewards["xp"]
+        user_quests["bonus_points"] = user_quests.get("bonus_points", 0) + rewards["bonus"]
+        user_quests["total_xp_from_quests"] = user_quests.get("total_xp_from_quests", 0) + rewards["xp"]
+        
+    except Exception as e:
+        logger.error(f"Ошибка проверки заданий: {e}")
     
     return user_quests, rewards
 
-# ========== ОСНОВНЫЕ КОМАНДЫ ==========
+# ========== ОСНОВНЫЕ КОМАНДЫ БОТА ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало работы с ботом"""
-    keyboard = [[InlineKeyboardButton("🎯 ПРИСОЕДИНИТЬСЯ", callback_data="join")]]
-    
-    await update.message.reply_text(
-        "Приветствуем вас в боте комьюнити «?»!\n"
-        "Нажмите кнопку ниже чтобы официально присоединиться",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    """Команда /start"""
+    try:
+        keyboard = [[InlineKeyboardButton("🎯 ПРИСОЕДИНИТЬСЯ", callback_data="join")]]
+        
+        await update.message.reply_text(
+            "Приветствуем вас в боте комьюнити «?»!\n"
+            "Нажмите кнопку ниже чтобы официально присоединиться",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в команде start: {e}")
 
 async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка присоединения"""
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    user_id = str(user.id)
-    
-    if user_id in users:
-        await query.edit_message_text("Вы уже в комьюнити! Используйте /profile")
-        return
-    
-    # Создаем нового пользователя
-    users[user_id] = {
-        "id": user.id,
-        "username": user.username or "",
-        "first_name": user.first_name,
-        "xp": 0,
-        "rank_symbol": "?",
-        "rank_name": "Луркер 🕶️",
-        "joined": datetime.now().isoformat(),
-        "last_heart": None,
-        "hearts_today": 0,
-        "last_like": None,
-        "likes_today": 0,
-        "last_nerd": None,
-        "warns": [],
-        "quests": init_user_quests()
-    }
-    
-    save_data()
-    
-    message = f"""🎉🎉 ПОЗДРАВЛЯЕМ, ВЫ ОФИЦИАЛЬНО ПРИСОЕДИНИЛИСЬ 🎉🎉
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        user_id = str(user.id)
+        
+        if user_id in users:
+            await query.edit_message_text("Вы уже в комьюнити! Используйте /profile")
+            return
+        
+        users[user_id] = {
+            "id": user.id,
+            "username": user.username or "",
+            "first_name": user.first_name,
+            "xp": 0,
+            "rank_symbol": "?",
+            "rank_name": "Луркер 🕶️",
+            "joined": datetime.now().isoformat(),
+            "last_heart": None,
+            "hearts_today": 0,
+            "last_like": None,
+            "likes_today": 0,
+            "last_nerd": None,
+            "warns": [],
+            "quests": init_user_quests()
+        }
+        
+        save_data()
+        
+        message = f"""🎉🎉 ПОЗДРАВЛЯЕМ, ВЫ ОФИЦИАЛЬНО ПРИСОЕДИНИЛИСЬ 🎉🎉
 
 🎴 Ваша карточка:
 👤 Имя: {user.first_name}
@@ -305,33 +321,36 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Чтобы повысить ранг, присоединяйтесь в чат и изучите правила:
 {RULES_LINK}"""
-    
-    keyboard = [[InlineKeyboardButton("📜 Правила", url=RULES_LINK)]]
-    
-    await query.edit_message_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        
+        keyboard = [[InlineKeyboardButton("📜 Правила", url=RULES_LINK)]]
+        
+        await query.edit_message_text(
+            text=message,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в join_callback: {e}")
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать профиль"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала присоединитесь через /start")
-        return
-    
-    user = users[user_id]
-    
-    next_rank = None
-    for rank in RANKS:
-        if rank["xp"] > user["xp"]:
-            next_rank = rank
-            break
-    
-    needed_xp = next_rank["xp"] - user["xp"] if next_rank else "МАКСИМУМ ДОСТИГНУТ!"
-    
-    message = f"""🎴 ВАША КАРТОЧКА:
+    """Команда /profile"""
+    try:
+        user_id = str(update.effective_user.id)
+        
+        if user_id not in users:
+            await update.message.reply_text("Сначала присоединитесь через /start")
+            return
+        
+        user = users[user_id]
+        
+        next_rank = None
+        for rank in RANKS:
+            if rank["xp"] > user["xp"]:
+                next_rank = rank
+                break
+        
+        needed_xp = next_rank["xp"] - user["xp"] if next_rank else "МАКСИМУМ ДОСТИГНУТ!"
+        
+        message = f"""🎴 ВАША КАРТОЧКА:
 
 👤 Имя: {user['first_name']}
 🏷️ Ранг: {user['rank_symbol']} — {user['rank_name']}
@@ -339,298 +358,281 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📈 До след. ранга: {needed_xp} XP
 📅 В комьюнити с: {datetime.fromisoformat(user['joined']).strftime('%d.%m.%Y')}
 ⚠️ Варнов: {len(user['warns'])}"""
-    
-    await update.message.reply_text(message)
+        
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Ошибка в profile: {e}")
 
 async def heart_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ❤️"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    now = datetime.now()
-    
-    # Проверка таймера (1 раз в минуту)
-    if user["last_heart"]:
-        last = datetime.fromisoformat(user["last_heart"])
-        if (now - last).seconds < 60:
-            time_left = 60 - (now - last).seconds
-            await update.message.reply_text(f"⏳ Подождите {time_left} секунд")
+    try:
+        user_id = str(update.effective_user.id)
+        
+        if user_id not in users:
+            await update.message.reply_text("Сначала /start")
             return
-    
-    # Проверка дневного лимита
-    if user["last_heart"] and datetime.fromisoformat(user["last_heart"]).date() == now.date():
-        if user.get("hearts_today", 0) >= 10:
-            await update.message.reply_text("⚠️ Лимит: 10 ❤️ в день")
-            return
-    
-    # Начисление XP
-    user["xp"] += 1
-    user["last_heart"] = now.isoformat()
-    user["hearts_today"] = user.get("hearts_today", 0) + 1
-    
-    # Обновляем прогресс задания
-    if "quests" in user:
-        user["quests"] = update_quest_progress(user["quests"], "hearts_given")
-    
-    # Проверка повышения ранга
-    old_rank = user["rank_name"]
-    new_symbol, new_name = get_rank_info(user["xp"])
-    
-    if old_rank != new_name:
-        user["rank_symbol"] = new_symbol
-        user["rank_name"] = new_name
-        rank_up = True
-    else:
-        rank_up = False
-    
-    # Проверяем выполнение заданий
-    if "quests" in user:
-        user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
-        if rewards["xp"] > 0:
-            user["xp"] += rewards["xp"]
-    
-    save_data()
-    
-    response = f"❤️ +1 XP!\nВсего XP: {user['xp']}"
-    
-    if rank_up:
-        response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
-    
-    await update.message.reply_text(response)
+        
+        user = users[user_id]
+        now = datetime.now()
+        
+        if user["last_heart"]:
+            last = datetime.fromisoformat(user["last_heart"])
+            if (now - last).seconds < 60:
+                time_left = 60 - (now - last).seconds
+                await update.message.reply_text(f"⏳ Подождите {time_left} секунд")
+                return
+        
+        if user["last_heart"] and datetime.fromisoformat(user["last_heart"]).date() == now.date():
+            if user.get("hearts_today", 0) >= 10:
+                await update.message.reply_text("⚠️ Лимит: 10 ❤️ в день")
+                return
+        
+        user["xp"] += 1
+        user["last_heart"] = now.isoformat()
+        user["hearts_today"] = user.get("hearts_today", 0) + 1
+        
+        if "quests" in user:
+            user["quests"] = update_quest_progress(user["quests"], "hearts_given")
+            user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
+            if rewards["xp"] > 0:
+                user["xp"] += rewards["xp"]
+        
+        old_rank = user["rank_name"]
+        new_symbol, new_name = get_rank_info(user["xp"])
+        
+        if old_rank != new_name:
+            user["rank_symbol"] = new_symbol
+            user["rank_name"] = new_name
+            rank_up = True
+        else:
+            rank_up = False
+        
+        save_data()
+        
+        response = f"❤️ +1 XP!\nВсего XP: {user['xp']}"
+        
+        if rank_up:
+            response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
+        
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Ошибка в heart_xp: {e}")
 
 async def like_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка 👍"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    now = datetime.now()
-    
-    # Проверка ранга (с 3 ранга = 150 XP)
-    if user["xp"] < 150:
-        await update.message.reply_text("👍 доступно с 3 ранга (150 XP)")
-        return
-    
-    # Проверка таймера (1 раз в 5 минут)
-    if user["last_like"]:
-        last = datetime.fromisoformat(user["last_like"])
-        if (now - last).seconds < 300:
-            time_left = 300 - (now - last).seconds
-            await update.message.reply_text(f"⏳ Подождите {time_left//60} минут")
+    try:
+        user_id = str(update.effective_user.id)
+        
+        if user_id not in users:
+            await update.message.reply_text("Сначала /start")
             return
-    
-    # Проверка дневного лимита
-    if user["last_like"] and datetime.fromisoformat(user["last_like"]).date() == now.date():
-        if user.get("likes_today", 0) >= 2:
-            await update.message.reply_text("⚠️ Лимит: 2 👍 в день")
+        
+        user = users[user_id]
+        now = datetime.now()
+        
+        if user["xp"] < 150:
+            await update.message.reply_text("👍 доступно с 3 ранга (150 XP)")
             return
-    
-    # Начисление XP
-    user["xp"] += 5
-    user["last_like"] = now.isoformat()
-    user["likes_today"] = user.get("likes_today", 0) + 1
-    
-    # Обновляем прогресс задания
-    if "quests" in user:
-        user["quests"] = update_quest_progress(user["quests"], "likes_given")
-    
-    # Проверка повышения ранга
-    old_rank = user["rank_name"]
-    new_symbol, new_name = get_rank_info(user["xp"])
-    
-    if old_rank != new_name:
-        user["rank_symbol"] = new_symbol
-        user["rank_name"] = new_name
-        rank_up = True
-    else:
-        rank_up = False
-    
-    # Проверяем выполнение заданий
-    if "quests" in user:
-        user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
-        if rewards["xp"] > 0:
-            user["xp"] += rewards["xp"]
-    
-    save_data()
-    
-    response = f"👍 +5 XP!\nВсего XP: {user['xp']}"
-    
-    if rank_up:
-        response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
-    
-    await update.message.reply_text(response)
+        
+        if user["last_like"]:
+            last = datetime.fromisoformat(user["last_like"])
+            if (now - last).seconds < 300:
+                time_left = 300 - (now - last).seconds
+                await update.message.reply_text(f"⏳ Подождите {time_left//60} минут")
+                return
+        
+        if user["last_like"] and datetime.fromisoformat(user["last_like"]).date() == now.date():
+            if user.get("likes_today", 0) >= 2:
+                await update.message.reply_text("⚠️ Лимит: 2 👍 в день")
+                return
+        
+        user["xp"] += 5
+        user["last_like"] = now.isoformat()
+        user["likes_today"] = user.get("likes_today", 0) + 1
+        
+        if "quests" in user:
+            user["quests"] = update_quest_progress(user["quests"], "likes_given")
+            user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
+            if rewards["xp"] > 0:
+                user["xp"] += rewards["xp"]
+        
+        old_rank = user["rank_name"]
+        new_symbol, new_name = get_rank_info(user["xp"])
+        
+        if old_rank != new_name:
+            user["rank_symbol"] = new_symbol
+            user["rank_name"] = new_name
+            rank_up = True
+        else:
+            rank_up = False
+        
+        save_data()
+        
+        response = f"👍 +5 XP!\nВсего XP: {user['xp']}"
+        
+        if rank_up:
+            response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
+        
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Ошибка в like_xp: {e}")
 
 async def nerd_xp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка 🤓"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    now = datetime.now()
-    
-    # Проверка ранга (с 7 ранга = 1200 XP)
-    if user["xp"] < 1200:
-        await update.message.reply_text("🤓 доступно с 7 ранга (1200 XP)")
-        return
-    
-    # Проверка дневного лимита
-    if user["last_nerd"] and datetime.fromisoformat(user["last_nerd"]).date() == now.date():
-        await update.message.reply_text("⚠️ Лимит: 1 🤓 в день")
-        return
-    
-    # Начисление XP
-    user["xp"] += 10
-    user["last_nerd"] = now.isoformat()
-    
-    # Обновляем прогресс задания
-    if "quests" in user:
-        user["quests"] = update_quest_progress(user["quests"], "nerds_given")
-    
-    # Проверка повышения ранга
-    old_rank = user["rank_name"]
-    new_symbol, new_name = get_rank_info(user["xp"])
-    
-    if old_rank != new_name:
-        user["rank_symbol"] = new_symbol
-        user["rank_name"] = new_name
-        rank_up = True
-    else:
-        rank_up = False
-    
-    # Проверяем выполнение заданий
-    if "quests" in user:
-        user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
-        if rewards["xp"] > 0:
-            user["xp"] += rewards["xp"]
-    
-    save_data()
-    
-    response = f"🤓 +10 XP!\nВсего XP: {user['xp']}"
-    
-    if rank_up:
-        response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
-    
-    await update.message.reply_text(response)
+    try:
+        user_id = str(update.effective_user.id)
+        
+        if user_id not in users:
+            await update.message.reply_text("Сначала /start")
+            return
+        
+        user = users[user_id]
+        now = datetime.now()
+        
+        if user["xp"] < 1200:
+            await update.message.reply_text("🤓 доступно с 7 ранга (1200 XP)")
+            return
+        
+        if user["last_nerd"] and datetime.fromisoformat(user["last_nerd"]).date() == now.date():
+            await update.message.reply_text("⚠️ Лимит: 1 🤓 в день")
+            return
+        
+        user["xp"] += 10
+        user["last_nerd"] = now.isoformat()
+        
+        if "quests" in user:
+            user["quests"] = update_quest_progress(user["quests"], "nerds_given")
+            user["quests"], rewards = check_quest_completion(user["quests"], user["xp"])
+            if rewards["xp"] > 0:
+                user["xp"] += rewards["xp"]
+        
+        old_rank = user["rank_name"]
+        new_symbol, new_name = get_rank_info(user["xp"])
+        
+        if old_rank != new_name:
+            user["rank_symbol"] = new_symbol
+            user["rank_name"] = new_name
+            rank_up = True
+        else:
+            rank_up = False
+        
+        save_data()
+        
+        response = f"🤓 +10 XP!\nВсего XP: {user['xp']}"
+        
+        if rank_up:
+            response = f"🎉 ПОЗДРАВЛЯЕМ! Новый ранг: {new_name}\n" + response
+        
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Ошибка в nerd_xp: {e}")
 
 async def quests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать задания"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала присоединитесь через /start")
-        return
-    
-    user = users[user_id]
-    user_quests = user.get("quests", {})
-    
-    # Инициализируем если нет
-    if not user_quests:
-        user_quests = init_user_quests()
-        users[user_id]["quests"] = user_quests
-        save_data()
-    
-    # Проверяем сброс
-    user_quests = check_daily_reset(user_quests)
-    
-    # Получаем доступные задания
-    available_quests = get_available_quests(user["xp"])
-    
-    # Формируем сообщение
-    message = "🎯 **ЕЖЕДНЕВНЫЕ ЗАДАНИЯ**\n\n"
-    
-    # Определяем группу рангов
-    if user["xp"] < 300:
-        rank_group = "Ранги 1-3"
-    elif user["xp"] < 1200:
-        rank_group = "Ранги 4-7"
-    else:
-        rank_group = "Ранги 7-9"
-    
-    message += f"📊 **Ваша группа:** {rank_group}\n\n"
-    
-    for quest in available_quests:
-        completed = quest["id"] in user_quests.get("completed_today", [])
-        progress = user_quests["daily_progress"].get(quest["type"], 0)
+    """Команда /quests"""
+    try:
+        user_id = str(update.effective_user.id)
         
-        if completed:
-            message += f"✅ **{quest['icon']} {quest['name']}**\n"
+        if user_id not in users:
+            await update.message.reply_text("Сначала присоединитесь через /start")
+            return
+        
+        user = users[user_id]
+        user_quests = user.get("quests", {})
+        
+        if not user_quests:
+            user_quests = init_user_quests()
+            users[user_id]["quests"] = user_quests
+            save_data()
+        
+        user_quests = check_daily_reset(user_quests)
+        available_quests = get_available_quests(user["xp"])
+        
+        message = "🎯 **ЕЖЕДНЕВНЫЕ ЗАДАНИЯ**\n\n"
+        
+        if user["xp"] < 300:
+            rank_group = "Ранги 1-3"
+        elif user["xp"] < 1200:
+            rank_group = "Ранги 4-7"
         else:
-            if quest["type"] == "no_punishments":
-                if user_quests["daily_progress"].get("punishments_received", 0) == 0:
-                    status = "✅ Нет наказаний"
-                else:
-                    status = "❌ Были наказания"
-                message += f"⏳ **{quest['icon']} {quest['name']}** - {status}\n"
-            else:
-                message += f"⏳ **{quest['icon']} {quest['name']}** - {progress}/{quest['goal']}\n"
+            rank_group = "Ранги 7-9"
+        
+        message += f"📊 **Ваша группа:** {rank_group}\n\n"
+        
+        for quest in available_quests:
+            completed = quest["id"] in user_quests.get("completed_today", [])
+            progress = user_quests["daily_progress"].get(quest["type"], 0)
             
-            message += f"   _{quest['description']}_\n"
-            message += f"   🎁 **{quest['reward_xp']} XP** + **{quest['reward_bonus']} BP**\n"
-    
-    # Статистика
-    completed_today = len(user_quests.get("completed_today", []))
-    bonus_points = user_quests.get("bonus_points", 0)
-    
-    message += f"\n📊 **Статистика:**\n"
-    message += f"✅ Выполнено сегодня: **{completed_today}**\n"
-    message += f"💎 Бонусных очков: **{bonus_points}**\n"
-    message += f"⭐ Всего XP с заданий: **{user_quests.get('total_xp_from_quests', 0)}**"
-    
-    await update.message.reply_text(message, parse_mode="Markdown")
-
-async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить награды за задания"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала присоединитесь через /start")
-        return
-    
-    user = users[user_id]
-    user_quests = user.get("quests", {})
-    
-    if not user_quests:
-        await update.message.reply_text("У вас нет заданий")
-        return
-    
-    # Проверяем выполнение заданий
-    user_quests, rewards = check_quest_completion(user_quests, user["xp"])
-    
-    if rewards["completed"]:
-        # Выдаем награды
-        user["xp"] += rewards["xp"]
-        user["quests"] = user_quests
+            if completed:
+                message += f"✅ **{quest['icon']} {quest['name']}**\n"
+            else:
+                if quest["type"] == "no_punishments":
+                    if user_quests["daily_progress"].get("punishments_received", 0) == 0:
+                        status = "✅ Нет наказаний"
+                    else:
+                        status = "❌ Были наказания"
+                    message += f"⏳ **{quest['icon']} {quest['name']}** - {status}\n"
+                else:
+                    message += f"⏳ **{quest['icon']} {quest['name']}** - {progress}/{quest['goal']}\n"
+                
+                message += f"   _{quest['description']}_\n"
+                message += f"   🎁 **{quest['reward_xp']} XP** + **{quest['reward_bonus']} BP**\n"
         
-        save_data()
+        completed_today = len(user_quests.get("completed_today", []))
+        bonus_points = user_quests.get("bonus_points", 0)
         
-        message = "🎉 **НАГРАДЫ ПОЛУЧЕНЫ!**\n\n"
-        for quest_name in rewards["completed"]:
-            message += f"✅ {quest_name}\n"
-        
-        message += f"\n📊 **Итого:**\n"
-        message += f"⭐ +{rewards['xp']} XP\n"
-        message += f"💎 +{rewards['bonus']} BP\n"
-        message += f"🏆 Всего XP: {user['xp']}"
+        message += f"\n📊 **Статистика:**\n"
+        message += f"✅ Выполнено сегодня: **{completed_today}**\n"
+        message += f"💎 Бонусных очков: **{bonus_points}**\n"
+        message += f"⭐ Всего XP с заданий: **{user_quests.get('total_xp_from_quests', 0)}**"
         
         await update.message.reply_text(message, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(
-            "📭 Нет выполненных заданий для получения наград\n"
-            "Продолжайте выполнять задания из /quests"
-        )
+    except Exception as e:
+        logger.error(f"Ошибка в quests_cmd: {e}")
+
+async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /claim"""
+    try:
+        user_id = str(update.effective_user.id)
+        
+        if user_id not in users:
+            await update.message.reply_text("Сначала присоединитесь через /start")
+            return
+        
+        user = users[user_id]
+        user_quests = user.get("quests", {})
+        
+        if not user_quests:
+            await update.message.reply_text("У вас нет заданий")
+            return
+        
+        user_quests, rewards = check_quest_completion(user_quests, user["xp"])
+        
+        if rewards["completed"]:
+            user["xp"] += rewards["xp"]
+            user["quests"] = user_quests
+            
+            save_data()
+            
+            message = "🎉 **НАГРАДЫ ПОЛУЧЕНЫ!**\n\n"
+            for quest_name in rewards["completed"]:
+                message += f"✅ {quest_name}\n"
+            
+            message += f"\n📊 **Итого:**\n"
+            message += f"⭐ +{rewards['xp']} XP\n"
+            message += f"💎 +{rewards['bonus']} BP\n"
+            message += f"🏆 Всего XP: {user['xp']}"
+            
+            await update.message.reply_text(message, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "📭 Нет выполненных заданий для получения наград\n"
+                "Продолжайте выполнять задания из /quests"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка в claim_cmd: {e}")
 
 async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать правила"""
+    """Команда /rules"""
     await update.message.reply_text(
         f"📜 Правила нашего комьюнити:\n\n"
         f"1. Уважайте друг друга\n"
@@ -640,176 +642,113 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Полные правила: {RULES_LINK}"
     )
 
-async def helpadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Позвать администратора"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    
-    # Только для рангов 1-7
-    if user["xp"] >= 1200:
-        await update.message.reply_text("Вы администратор! Можете помогать другим.")
-        return
-    
-    await update.message.reply_text(
-        f"🆘 Ваш запрос отправлен администраторам!\n"
-        f"Ожидайте ответа в чате: {CHAT_LINK}"
-    )
-
-async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Мут пользователя"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    
-    # Определяем время мута в зависимости от ранга
-    if user["xp"] < 300:  # Ранги 1-3
-        time_str = "5 минут"
-    elif user["xp"] < 1700:  # Ранги 4-7
-        time_str = "30 минут"
-    else:  # Ранги 8-9
-        time_str = "7 дней"
-    
-    if not context.args:
-        await update.message.reply_text(f"Использование: /mute @username причина\nВы можете мутить на: {time_str}")
-        return
-    
-    await update.message.reply_text(f"🔇 Мут выдан на {time_str}")
-
-async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выдать предупреждение"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    
-    # Только с 4 ранга
-    if user["xp"] < 300:
-        await update.message.reply_text("⚠️ Доступно с 4 ранга (Мемолог)")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("Использование: /warn @username причина")
-        return
-    
-    await update.message.reply_text("⚠️ Предупреждение выдано")
-
-async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Бан пользователя"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id not in users:
-        await update.message.reply_text("Сначала /start")
-        return
-    
-    user = users[user_id]
-    
-    # Только с 8 ранга
-    if user["xp"] < 1700:
-        await update.message.reply_text("🔨 Доступно с 8 ранга (Интегратор)")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("Использование: /ban @username причина")
-        return
-    
-    await update.message.reply_text("🔨 Бан на 30 дней")
-
 async def chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ссылка на чат"""
+    """Команда /chat"""
     await update.message.reply_text(
         f"💬 Основной чат комьюнити:\n{CHAT_LINK}\n\n"
         f"📜 Правила:\n{RULES_LINK}"
     )
 
-async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка стикеров - антиспам"""
-    user_id = str(update.effective_user.id)
-    now = datetime.now()
-    
-    if user_id not in sticker_tracker:
-        sticker_tracker[user_id] = {"count": 0, "time": now}
-    
-    data = sticker_tracker[user_id]
-    
-    # Если прошла минута, сбрасываем счетчик
-    if (now - data["time"]).seconds > 60:
-        data["count"] = 1
-        data["time"] = now
-    else:
-        data["count"] += 1
-    
-    # Если 5 стикеров в минуту - выдать варн
-    if data["count"] >= 5 and user_id in users:
-        warn_data = {
-            "reason": "Спам стикерами (5+ в минуту)",
-            "time": now.isoformat(),
-            "admin": "SYSTEM"
-        }
+async def helpadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /helpadmin"""
+    try:
+        user_id = str(update.effective_user.id)
         
-        users[user_id]["warns"].append(warn_data)
+        if user_id not in users:
+            await update.message.reply_text("Сначала /start")
+            return
         
-        # Отмечаем наказание для заданий
-        if "quests" in users[user_id]:
-            users[user_id]["quests"] = update_quest_progress(users[user_id]["quests"], "punishments_received")
+        user = users[user_id]
         
-        save_data()
+        if user["xp"] >= 1200:
+            await update.message.reply_text("Вы администратор! Можете помогать другим.")
+            return
         
         await update.message.reply_text(
-            f"⚠️ @{update.effective_user.username or 'Пользователь'} "
-            f"получил предупреждение за спам стикерами!"
+            f"🆘 Ваш запрос отправлен администраторам!\n"
+            f"Ожидайте ответа в чате: {CHAT_LINK}"
         )
+    except Exception as e:
+        logger.error(f"Ошибка в helpadmin_cmd: {e}")
+
+async def sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка стикеров"""
+    try:
+        user_id = str(update.effective_user.id)
+        now = datetime.now()
         
-        # Сбрасываем счетчик
-        data["count"] = 0
+        if user_id not in sticker_tracker:
+            sticker_tracker[user_id] = {"count": 0, "time": now}
+        
+        data = sticker_tracker[user_id]
+        
+        if (now - data["time"]).seconds > 60:
+            data["count"] = 1
+            data["time"] = now
+        else:
+            data["count"] += 1
+        
+        if data["count"] >= 5 and user_id in users:
+            warn_data = {
+                "reason": "Спам стикерами (5+ в минуту)",
+                "time": now.isoformat(),
+                "admin": "SYSTEM"
+            }
+            
+            users[user_id]["warns"].append(warn_data)
+            
+            if "quests" in users[user_id]:
+                users[user_id]["quests"] = update_quest_progress(users[user_id]["quests"], "punishments_received")
+            
+            save_data()
+            
+            await update.message.reply_text(
+                f"⚠️ @{update.effective_user.username or 'Пользователь'} "
+                f"получил предупреждение за спам стикерами!"
+            )
+            
+            data["count"] = 0
+    except Exception as e:
+        logger.error(f"Ошибка в sticker_handler: {e}")
 
 # ========== ЗАПУСК БОТА ==========
 def main():
     """Основная функция запуска бота"""
+    logger.info("Запуск бота...")
+    
     # Загружаем данные
     load_data()
     
-    # Создаем приложение
-    app = Application.builder().token(TOKEN).build()
-    
-    # Добавляем обработчики команд
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("profile", profile))
-    app.add_handler(CommandHandler("quests", quests_cmd))
-    app.add_handler(CommandHandler("claim", claim_cmd))
-    app.add_handler(CommandHandler("rules", rules_cmd))
-    app.add_handler(CommandHandler("chat", chat_cmd))
-    app.add_handler(CommandHandler("helpadmin", helpadmin_cmd))
-    app.add_handler(CommandHandler("mute", mute_cmd))
-    app.add_handler(CommandHandler("warn", warn_cmd))
-    app.add_handler(CommandHandler("ban", ban_cmd))
-    
-    # Обработчики реакций (эмодзи)
-    app.add_handler(MessageHandler(filters.Regex("❤️"), heart_xp))
-    app.add_handler(MessageHandler(filters.Regex("👍"), like_xp))
-    app.add_handler(MessageHandler(filters.Regex("🤓"), nerd_xp))
-    
-    # Обработчик стикеров
-    app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
-    
-    # Callback запросы
-    app.add_handler(CallbackQueryHandler(join_callback, pattern="^join$"))
-    
-    print("🤖 Бот запущен! Нажмите Ctrl+C для остановки.")
-    
-    # Запускаем бота
-    app.run_polling()
+    try:
+        # Создаем приложение
+        app = Application.builder().token(TOKEN).build()
+        
+        # Добавляем обработчики команд
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("profile", profile))
+        app.add_handler(CommandHandler("quests", quests_cmd))
+        app.add_handler(CommandHandler("claim", claim_cmd))
+        app.add_handler(CommandHandler("rules", rules_cmd))
+        app.add_handler(CommandHandler("chat", chat_cmd))
+        app.add_handler(CommandHandler("helpadmin", helpadmin_cmd))
+        
+        # Обработчики реакций
+        app.add_handler(MessageHandler(filters.Regex("❤️"), heart_xp))
+        app.add_handler(MessageHandler(filters.Regex("👍"), like_xp))
+        app.add_handler(MessageHandler(filters.Regex("🤓"), nerd_xp))
+        
+        # Обработчик стикеров
+        app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
+        
+        # Callback запросы
+        app.add_handler(CallbackQueryHandler(join_callback, pattern="^join$"))
+        
+        # Запускаем бота
+        logger.info("🤖 Бот запущен!")
+        app.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Критическая ошибка при запуске бота: {e}")
 
 if __name__ == "__main__":
     main()
